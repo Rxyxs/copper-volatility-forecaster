@@ -20,3 +20,7 @@ Thumbs.db
 
 # Env
 .env
+
+# Internal notes / assistant config (not for publication)
+CLAUDE.md
+.claude/
