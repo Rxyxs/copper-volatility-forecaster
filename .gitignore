@@ -1,0 +1,22 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Data / artifacts
+data/*.csv
+data/*.parquet
+*.cbm
+optuna_study.db
+catboost_info/
+
+# OS / editor
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Env
+.env
