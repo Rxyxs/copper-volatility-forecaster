@@ -1,178 +1,105 @@
 """
 Copper price volatility forecaster.
 
-Predicts forward realized volatility of copper prices with CatBoost, validated
-with strict walk-forward time-series cross-validation (TimeSeriesSplit).
+Predicts forward realized volatility of copper prices with an Optuna-tuned
+CatBoost model, benchmarked against two econometric baselines -- GARCH(1,1)
+and HAR-RV (Corsi 2009) -- on identical walk-forward (`TimeSeriesSplit`)
+folds. Explainability (global + local) is computed with SHAP to quantify
+how much predictive weight the macro (USD index, global risk proxy) and
+volume features actually carry, versus the pure return-based features.
 
-Data note: this initial version generates a SYNTHETIC daily copper price series
-(GARCH(1,1)-style volatility clustering) as a placeholder so the full pipeline
-can be built and validated end to end. It is explicitly labeled as synthetic
-below and is meant to be swapped for a real sourced series (e.g. LME/COMEX
-copper futures) before any real forecasting is done on it.
+Data note: this pipeline runs on a SYNTHETIC daily copper price/volume/macro
+series (GARCH-X volatility clustering with documented, injected macro
+leading indicators -- see `src/data.py`) as a placeholder so the full
+pipeline can be built and validated end to end. It is explicitly labeled as
+synthetic throughout and is meant to be swapped for a real sourced series
+(e.g. LME/COMEX copper futures + real macro data) before any real
+forecasting is done on it.
 """
 
 from __future__ import annotations
 
-import datetime as dt
+import json
+import sys
+from pathlib import Path
+
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 import numpy as np
-import polars as pl
-from catboost import CatBoostRegressor, Pool
-from sklearn.model_selection import TimeSeriesSplit
 
-SEED = 42
-N_DAYS = 3000
-VOL_TARGET_HORIZON = 5          # predict realized vol over the NEXT 5 trading days
-FEATURE_WINDOWS = (5, 10, 20, 60)
-N_CV_SPLITS = 5
+from src.data import N_DAYS, generate_synthetic_copper_market
+from src.explainability import compute_shap_values, global_importance_by_group, global_importance_by_feature
+from src.features import VOL_TARGET_HORIZON, build_features_and_target
+from src.modeling import N_CV_SPLITS, fit_final_model, run_walk_forward_comparison
+from src.tuning import run_optuna_search
 
-
-def generate_synthetic_copper_prices(n_days: int = N_DAYS, seed: int = SEED) -> pl.DataFrame:
-    """Simulate a daily copper price series with GARCH(1,1) volatility clustering.
-
-    SYNTHETIC DATA — not real copper prices. Used only to exercise the pipeline.
-    """
-    rng = np.random.default_rng(seed)
-
-    omega, alpha, beta = 1e-6, 0.08, 0.90  # GARCH(1,1) params (alpha+beta < 1 => stationary)
-    mu = 0.0002  # small daily drift
-
-    variances = np.empty(n_days)
-    returns = np.empty(n_days)
-    variances[0] = omega / (1 - alpha - beta)
-    returns[0] = mu + np.sqrt(variances[0]) * rng.standard_normal()
-
-    for t in range(1, n_days):
-        variances[t] = omega + alpha * returns[t - 1] ** 2 + beta * variances[t - 1]
-        returns[t] = mu + np.sqrt(variances[t]) * rng.standard_normal()
-
-    price0 = 4.00  # USD/lb, roughly realistic copper price scale
-    prices = price0 * np.exp(np.cumsum(returns))
-
-    start = dt.date(2015, 1, 1)
-    end = start + dt.timedelta(days=n_days - 1)
-    dates = pl.date_range(start=start, end=end, interval="1d", eager=True)
-
-    return pl.DataFrame({"date": dates, "price": prices})
-
-
-def build_features_and_target(
-    df: pl.DataFrame,
-    horizon: int = VOL_TARGET_HORIZON,
-    windows: tuple[int, ...] = FEATURE_WINDOWS,
-) -> pl.DataFrame:
-    """Build lookahead-safe features and the forward realized-volatility target.
-
-    Lookahead-bias rule: every feature at row t is built from `log_return` values
-    shifted by at least 1, so it only ever sees data strictly before day t. The
-    target at row t is realized volatility computed from returns at t+1..t+horizon
-    (strictly future), which is fine for a *target* but must never leak into a
-    feature column.
-    """
-    df = df.sort("date").with_columns(
-        (pl.col("price").log() - pl.col("price").log().shift(1)).alias("log_return")
-    )
-
-    feature_exprs = []
-    for w in windows:
-        past_return = pl.col("log_return").shift(1)  # never use today's own return
-        feature_exprs.append(
-            past_return.rolling_std(window_size=w).alias(f"realized_vol_{w}d")
-        )
-        feature_exprs.append(
-            past_return.rolling_mean(window_size=w).alias(f"mean_return_{w}d")
-        )
-
-    df = df.with_columns(feature_exprs)
-
-    # Lagged raw returns (t-1, t-2, t-3) as short-memory features.
-    df = df.with_columns(
-        [pl.col("log_return").shift(lag).alias(f"lag_return_{lag}") for lag in (1, 2, 3)]
-    )
-
-    # Calendar features are safe (known in advance, no leakage).
-    df = df.with_columns(
-        [
-            pl.col("date").dt.weekday().alias("day_of_week"),
-            pl.col("date").dt.month().alias("month"),
-        ]
-    )
-
-    # Target: realized volatility over the NEXT `horizon` days (strictly future
-    # returns from t+1 .. t+horizon), aligned to row t. This uses future data by
-    # construction because it IS the forecast target, not a feature.
-    future_return = pl.col("log_return").shift(-1)
-    df = df.with_columns(
-        future_return.rolling_std(window_size=horizon)
-        .shift(-(horizon - 1))
-        .alias("target_fwd_realized_vol")
-    )
-
-    feature_cols = [c for c in df.columns if c.startswith(("realized_vol_", "mean_return_", "lag_return_"))]
-    feature_cols += ["day_of_week", "month"]
-
-    df = df.drop_nulls(subset=feature_cols + ["target_fwd_realized_vol"])
-    return df, feature_cols
-
-
-def run_time_series_cv(
-    df: pl.DataFrame, feature_cols: list[str], target_col: str, n_splits: int = N_CV_SPLITS
-) -> None:
-    """Strict walk-forward CV: TimeSeriesSplit guarantees every validation fold
-    comes strictly after its training fold in time, so no future information
-    ever informs a model evaluated on the past.
-    """
-    X = df.select(feature_cols).to_numpy()
-    y = df.select(target_col).to_numpy().ravel()
-
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    fold_rmses = []
-    fold_maes = []
-
-    for fold, (train_idx, val_idx) in enumerate(tscv.split(X), start=1):
-        X_train, X_val = X[train_idx], X[val_idx]
-        y_train, y_val = y[train_idx], y[val_idx]
-
-        train_pool = Pool(X_train, y_train, feature_names=feature_cols)
-        val_pool = Pool(X_val, y_val, feature_names=feature_cols)
-
-        model = CatBoostRegressor(
-            iterations=500,
-            learning_rate=0.05,
-            depth=6,
-            loss_function="RMSE",
-            random_seed=SEED,
-            verbose=False,
-        )
-        model.fit(train_pool, eval_set=val_pool, early_stopping_rounds=50)
-
-        preds = model.predict(X_val)
-        rmse = float(np.sqrt(np.mean((preds - y_val) ** 2)))
-        mae = float(np.mean(np.abs(preds - y_val)))
-        fold_rmses.append(rmse)
-        fold_maes.append(mae)
-
-        print(
-            f"[fold {fold}/{n_splits}] train={len(train_idx):>5d} val={len(val_idx):>5d} "
-            f"RMSE={rmse:.6f} MAE={mae:.6f}"
-        )
-
-    print("-" * 60)
-    print(f"CV mean RMSE: {np.mean(fold_rmses):.6f} (+/- {np.std(fold_rmses):.6f})")
-    print(f"CV mean MAE : {np.mean(fold_maes):.6f} (+/- {np.std(fold_maes):.6f})")
+OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
+N_OPTUNA_TRIALS = 30
 
 
 def main() -> None:
-    print("Generating synthetic copper price series (GARCH(1,1) volatility)...")
-    prices = generate_synthetic_copper_prices()
+    OUTPUTS_DIR.mkdir(exist_ok=True)
+
+    print(f"Generating synthetic copper market series ({N_DAYS} days: price, volume, usd_index, risk_proxy)...")
+    market = generate_synthetic_copper_market()
 
     print("Building lookahead-safe features and forward-volatility target...")
-    df, feature_cols = build_features_and_target(prices)
+    df, feature_cols, feature_groups = build_features_and_target(market)
     print(f"Rows after feature/target construction: {df.height}")
     print(f"Features used ({len(feature_cols)}): {feature_cols}")
 
-    print(f"\nRunning TimeSeriesSplit CV ({N_CV_SPLITS} folds)...")
-    run_time_series_cv(df, feature_cols, target_col="target_fwd_realized_vol")
+    print(f"\nRunning Optuna search ({N_OPTUNA_TRIALS} trials, single chronological holdout split)...")
+    study = run_optuna_search(df, feature_cols, target_col="target_fwd_realized_vol", n_trials=N_OPTUNA_TRIALS)
+    best_params = study.best_params
+    print(f"Best params: {best_params}")
+    print(f"Best single-split holdout RMSE: {study.best_value:.6f}")
+
+    print(f"\nRunning walk-forward comparison (CatBoost tuned vs. GARCH(1,1) vs. HAR-RV), {N_CV_SPLITS} folds...")
+    comparison = run_walk_forward_comparison(
+        df, feature_cols, target_col="target_fwd_realized_vol",
+        catboost_params=best_params, horizon=VOL_TARGET_HORIZON,
+    )
+
+    print("\n" + "-" * 70)
+    print(f"{'Model':<12}{'RMSE (mean)':>16}{'RMSE (std)':>14}{'MAE (mean)':>14}{'MAE (std)':>13}")
+    for name in ("catboost", "garch", "har_rv"):
+        r = comparison[name]
+        print(f"{name:<12}{r['rmse_mean']:>16.6f}{r['rmse_std']:>14.6f}{r['mae_mean']:>14.6f}{r['mae_std']:>13.6f}")
+
+    print("\nFitting final CatBoost model (full series) for SHAP explainability...")
+    final_model = fit_final_model(df, feature_cols, "target_fwd_realized_vol", best_params)
+
+    print("Computing SHAP values (TreeExplainer)...")
+    _, shap_values, X_df = compute_shap_values(final_model, df, feature_cols)
+    importance_by_feature = global_importance_by_feature(shap_values, feature_cols)
+    importance_by_group = global_importance_by_group(shap_values, feature_cols, feature_groups)
+
+    print("\nSHAP importance by feature group:")
+    print(importance_by_group.to_string(index=False))
+    print("\nTop 10 SHAP features:")
+    print(importance_by_feature.head(10).to_string(index=False))
+
+    importance_by_feature.to_csv(OUTPUTS_DIR / "shap_feature_importance.csv", index=False)
+    importance_by_group.to_csv(OUTPUTS_DIR / "shap_group_importance.csv", index=False)
+    np.save(OUTPUTS_DIR / "shap_values.npy", shap_values)
+    X_df.to_parquet(OUTPUTS_DIR / "shap_features.parquet")
+    final_model.save_model(str(OUTPUTS_DIR / "final_catboost_model.cbm"))
+
+    with open(OUTPUTS_DIR / "optuna_best_params.json", "w", encoding="utf-8") as f:
+        json.dump({"best_params": best_params, "best_holdout_rmse": study.best_value}, f, indent=2)
+
+    with open(OUTPUTS_DIR / "walk_forward_comparison.json", "w", encoding="utf-8") as f:
+        json.dump(comparison, f, indent=2)
+
+    optuna_history = [
+        {"trial": t.number, "value": t.value, "params": t.params}
+        for t in study.trials if t.value is not None
+    ]
+    with open(OUTPUTS_DIR / "optuna_trial_history.json", "w", encoding="utf-8") as f:
+        json.dump(optuna_history, f, indent=2)
+
+    print(f"\nArtifacts written to: {OUTPUTS_DIR}")
 
 
 if __name__ == "__main__":

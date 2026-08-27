@@ -12,6 +12,7 @@ data/*.parquet
 *.cbm
 optuna_study.db
 catboost_info/
+outputs/
 
 # OS / editor
 .vscode/
