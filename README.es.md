@@ -278,10 +278,10 @@ Optuna, e invariantes de forma/agregación de SHAP.
   vez de una única búsqueda de Optuna reutilizada en los 5 folds
   walk-forward.
 
-## Autor
-
-**Pablo Reyes**
-
 ## Licencia
 
 MIT — ver [LICENSE](LICENSE).
+
+## Autor
+
+**Pablo Reyes** — [github.com/Rxyxs](https://github.com/Rxyxs)

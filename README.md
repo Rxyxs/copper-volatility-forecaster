@@ -259,10 +259,10 @@ sanity, and SHAP shape/aggregation invariants.
 - Add a rolling/expanding hyperparameter re-tuning schedule instead of a
   single Optuna search reused across all 5 walk-forward folds.
 
-## Author
-
-**Pablo Reyes**
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Author
+
+**Pablo Reyes** — [github.com/Rxyxs](https://github.com/Rxyxs)
