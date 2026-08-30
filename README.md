@@ -50,6 +50,16 @@ return-based ones.
   copper's own price action) tells a risk desk which external dashboards
   are actually worth watching for this exposure.
 
+## Business Impact & Key Performance Indicators
+
+| Metric | Result | What it means |
+|---|---|---|
+| Best benchmark model | **GARCH(1,1)**, RMSE 0.007824 | Beats both HAR-RV (0.008076) and Optuna-tuned CatBoost (0.008163) -- reported honestly with the structural reason, not tuned to make ML win |
+| SHAP macro-signal weight | 10.81% (`usd_index`/`risk_proxy`) | Validated against a known ground truth -- these are the exact features injected as genuine variance drivers |
+| SHAP volume weight | 41.35% (largest group) | Consistent with volume being tied directly to the conditional-volatility path in the data-generating process |
+| HAR-RV vs. CatBoost gap | 0.008076 vs. 0.008163 RMSE | A 3-regressor linear model lands remarkably close to a tuned gradient booster -- realized-vol forecasting has strong classical baselines |
+
+
 ## Architecture
 
 ```mermaid

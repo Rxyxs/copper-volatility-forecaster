@@ -55,6 +55,16 @@ frente a las derivadas puramente del retorno.
   cobre) le dice a una mesa de riesgo qué dashboards externos realmente vale
   la pena monitorear para esta exposición.
 
+## Impacto de Negocio e Indicadores Clave (KPIs)
+
+| Métrica | Resultado | Qué significa |
+|---|---|---|
+| Mejor modelo del benchmark | **GARCH(1,1)**, RMSE 0,007824 | Le gana tanto a HAR-RV (0,008076) como a CatBoost afinado con Optuna (0,008163) -- reportado honestamente con la razón estructural, no ajustado para que gane el ML |
+| Peso macro en SHAP | 10,81% (`usd_index`/`risk_proxy`) | Validado contra una verdad conocida -- son exactamente las features inyectadas como drivers genuinos de varianza |
+| Peso de volumen en SHAP | 41,35% (el grupo mayor) | Consistente con que el volumen está ligado directamente a la trayectoria de volatilidad condicional en el proceso generador |
+| Brecha HAR-RV vs. CatBoost | 0,008076 vs. 0,008163 RMSE | Un modelo lineal de 3 regresores queda notablemente cerca de un gradient booster afinado -- el pronóstico de volatilidad realizada tiene baselines clásicos fuertes |
+
+
 ## Arquitectura
 
 ```mermaid

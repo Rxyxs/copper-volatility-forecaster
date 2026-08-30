@@ -18,6 +18,8 @@ outputs/
 .vscode/
 .DS_Store
 Thumbs.db
+CLAUDE.md
+.claude/
 
 # Env
 .env
