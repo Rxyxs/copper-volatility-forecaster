@@ -12,3 +12,5 @@ matplotlib==3.10.9
 jupyter==1.1.1
 nbformat==5.11.1
 pytest==9.1.1
+torch==2.13.0
+duckdb==1.5.5

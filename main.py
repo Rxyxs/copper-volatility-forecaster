@@ -19,6 +19,7 @@ forecasting is done on it.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -29,9 +30,12 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 import numpy as np
 
 from src.data import N_DAYS, generate_synthetic_copper_market
+from src.deep_learning import run_activation_comparison
 from src.explainability import compute_shap_values, global_importance_by_group, global_importance_by_feature
 from src.features import VOL_TARGET_HORIZON, build_features_and_target
 from src.modeling import N_CV_SPLITS, fit_final_model, run_walk_forward_comparison
+from src.persistence import get_connection, persist_comparison
+from src.plots import plot_mlp_loss_curves, plot_predicted_vs_actual, plot_residual_distribution
 from src.tuning import run_optuna_search
 
 OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
@@ -66,6 +70,47 @@ def main() -> None:
     for name in ("catboost", "garch", "har_rv"):
         r = comparison[name]
         print(f"{name:<12}{r['rmse_mean']:>16.6f}{r['rmse_std']:>14.6f}{r['mae_mean']:>14.6f}{r['mae_std']:>13.6f}")
+
+    print(f"\nRunning PyTorch MLP activation comparison (ReLU/GELU/Swish), {N_CV_SPLITS} folds...")
+    mlp_comparison = run_activation_comparison(
+        df, feature_cols, target_col="target_fwd_realized_vol", n_splits=N_CV_SPLITS,
+    )
+    best_activation = mlp_comparison["best_activation"]
+    print(f"\nBest MLP activation: {best_activation}")
+    for name, r in mlp_comparison["by_activation"].items():
+        print(f"mlp[{name:<6}]  RMSE={r['rmse_mean']:.6f}  MAE={r['mae_mean']:.6f}  "
+              f"latency={r['latency_ms_per_sample']:.4f} ms/sample")
+
+    print("\nWriting comparison plots to outputs/plots/...")
+    best_preds = mlp_comparison["best_detail"]["preds"]
+    best_actual = mlp_comparison["best_detail"]["actual"]
+    predictions_for_plots = {f"mlp_{best_activation}": (best_preds, best_actual)}
+    plot_predicted_vs_actual(predictions_for_plots)
+    plot_residual_distribution(predictions_for_plots)
+    loss_histories = {
+        act: {
+            "train_loss_history": detail["train_loss_history"],
+            "val_loss_history": detail["val_loss_history"],
+        }
+        for act, detail in mlp_comparison["all_detail"].items()
+    }
+    plot_mlp_loss_curves(loss_histories)
+
+    print("Persisting comparative metrics to DuckDB (outputs/comparison_metrics.duckdb)...")
+    con = get_connection()
+    run_id = dt.datetime.now()
+    all_metrics = {
+        "catboost": comparison["catboost"],
+        "garch": comparison["garch"],
+        "har_rv": comparison["har_rv"],
+    }
+    for act, r in mlp_comparison["by_activation"].items():
+        all_metrics[f"mlp_{act}"] = r
+    persist_comparison(
+        con, run_id, all_metrics,
+        {f"mlp_{best_activation}": (best_preds, best_actual)},
+    )
+    con.close()
 
     print("\nFitting final CatBoost model (full series) for SHAP explainability...")
     final_model = fit_final_model(df, feature_cols, "target_fwd_realized_vol", best_params)

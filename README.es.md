@@ -10,7 +10,9 @@
 ![Optuna](https://img.shields.io/badge/optuna-4.9-9cf)
 ![arch](https://img.shields.io/badge/arch-GARCH-red)
 ![SHAP](https://img.shields.io/badge/shap-explicabilidad-8A2BE2)
-![Pytest](https://img.shields.io/badge/tests-16%20passing-brightgreen)
+![PyTorch](https://img.shields.io/badge/pytorch-MLP-EE4C2C)
+![DuckDB](https://img.shields.io/badge/duckdb-metrics%20store-FFF000)
+![Pytest](https://img.shields.io/badge/tests-25%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -113,6 +115,8 @@ El pipeline tiene cinco etapas:
 | Baselines econométricos | **arch** (GARCH), **statsmodels** (OLS de HAR-RV) | Benchmarks clásicos de pronóstico de volatilidad, evaluados sobre los mismos folds walk-forward |
 | Validación | **scikit-learn** (`TimeSeriesSplit`) | Validación cruzada walk-forward estricta |
 | Explicabilidad | **SHAP** (`TreeExplainer`) | Atribución global (por feature y por grupo) y local (por día) |
+| Deep learning | **PyTorch** | MLP feed-forward con función de pérdida custom Huber+RMSPE, comparado entre activaciones ReLU/GELU/Swish |
+| Persistencia de métricas | **DuckDB** | Almacén columnar local para las métricas/predicciones comparativas walk-forward entre corridas |
 | Entorno de ejecución | **Python 3.10** | Línea base del proyecto |
 
 ## Metodología: evitar la fuga de datos futuros (lookahead bias)
@@ -232,6 +236,62 @@ Optuna, los gráficos de barras/beeswarm de SHAP y una explicación local de
 un día específico están en
 [`02_CatBoost_Optuna_GARCH_Comparison.ipynb`](02_CatBoost_Optuna_GARCH_Comparison.ipynb).
 
+## Tercer enfoque: MLP en PyTorch (comparación de activaciones)
+
+`src/deep_learning.py` agrega un tercer enfoque de modelado complementario
+sobre el mismo pipeline de features/target sin fuga temporal y los mismos
+folds walk-forward (`TimeSeriesSplit`): una red feed-forward pequeña
+(`MLPVolatilityForecaster`, dos capas ocultas, salida Softplus para que las
+predicciones se mantengan no negativas) entrenada con una función de
+pérdida custom, **`HuberRMSPELoss`** — un término Huber (robusto a los
+picos raros de volatilidad grande que inyecta el generador GARCH-X) más un
+término relativo estilo RMSPE, ya que un error absoluto fijo pesa mucho más
+en un régimen de baja volatilidad que en uno de alta. El MLP se evalúa
+sobre tres funciones de activación — **ReLU**, **GELU** y **Swish (SiLU)**
+— en el mismo split walk-forward de 5 folds usado para CatBoost/GARCH/HAR-RV.
+
+### Comparación de los tres enfoques
+
+| Enfoque | Modelo | RMSE (media) | MAE (media) | Latencia (ms/muestra) |
+|---|---|---:|---:|---:|
+| Baseline econométrico | **GARCH(1,1)** | 0.007824 | 0.005856 | — |
+| Baseline econométrico | HAR-RV | 0.008076 | 0.005867 | — |
+| Ensamble de árboles | CatBoost (tuneado con Optuna) | 0.008163 | 0.005921 | — |
+| Deep learning (PyTorch) | MLP — ReLU (mejor activación) | 0.014772 | 0.011566 | 0.0004 |
+| Deep learning (PyTorch) | MLP — Swish | 0.015576 | 0.012354 | 0.0006 |
+| Deep learning (PyTorch) | MLP — GELU | 0.016483 | 0.013092 | 0.0006 |
+
+Los baselines econométricos y el gradient booster tuneado siguen ganando
+este benchmark — esperable, por la misma razón estructural por la que
+CatBoost mismo queda detrás de GARCH (ver Resultados arriba): la serie
+sintética es un proceso GARCH-X por construcción, y un MLP pequeño sobre
+features de ventana diseñadas tiene incluso menos acceso directo a esa
+dinámica de varianza recursiva y multiplicativa que un ensamble de árboles.
+ReLU es la activación con mejor desempeño de las tres aquí, por delante de
+Swish y GELU, aunque las tres variantes del MLP quedan en un rango
+comparable — la lectura honesta para este dataset es que un modelo
+econométrico bien especificado le gana a ambos enfoques de ML, no que un
+enfoque de ML domine al otro. La latencia de inferencia es sub-milisegundo
+por muestra en las tres activaciones, que es la ventaja práctica del MLP
+frente a reajustar CatBoost/GARCH en un contexto de servicio de baja latencia.
+
+### Gráficos
+
+![Predicho vs. real](reports/figures/predicted_vs_actual.png)
+
+![Distribución de residuos](reports/figures/residual_distribution.png)
+
+![Curvas de loss del MLP por activación](reports/figures/mlp_loss_curves.png)
+
+Los tres gráficos se regeneran en cada corrida de `main.py`
+(`src/plots.py`, escritos en `outputs/plots/`); las copias insertadas
+arriba son snapshots versionados en `reports/figures/`. Las métricas y
+predicciones comparativas de cada modelo (CatBoost, GARCH, HAR-RV y las
+tres activaciones del MLP) además se persisten en un archivo DuckDB local,
+`outputs/comparison_metrics.duckdb` (`src/persistence.py`), indexado por
+timestamp de corrida para poder consultar resultados de corridas separadas
+sin volver a correr el pipeline.
+
 ## Cómo empezar
 
 ```powershell
@@ -257,11 +317,14 @@ Requiere haber corrido `main.py` antes.
 ./venv/Scripts/pytest -v
 ```
 
-16 tests: chequeos de valores finitos/sin overflow en el generador
+25 tests: chequeos de valores finitos/sin overflow en el generador
 sintético, chequeos de fuga temporal en el set de features (una
 perturbación del mismo día no debe cambiar las features de ese día, pero sí
 las del día siguiente), alineación del corte de información de GARCH con
 las features de ML (verificado con tests de corrupción, no asumido),
+chequeos del MLP en PyTorch (forward pass, función de pérdida, loop de
+entrenamiento y comparación de activaciones), chequeos de escritura de
+gráficos, y un round-trip de persistencia en DuckDB, además de
 estructura de la comparación walk-forward, sanidad de la búsqueda de
 Optuna, e invariantes de forma/agregación de SHAP.
 

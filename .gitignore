@@ -13,6 +13,7 @@ data/*.parquet
 optuna_study.db
 catboost_info/
 outputs/
+*.duckdb
 
 # OS / editor
 .vscode/
