@@ -281,6 +281,10 @@ frente a reajustar CatBoost/GARCH en un contexto de servicio de baja latencia.
 
 ![Distribución de residuos](reports/figures/residual_distribution.png)
 
+La versión animada de abajo traza el loss de entrenamiento/validación de cada activación época por época, con una etiqueta de valor que se actualiza en vivo en la punta de cada línea.
+
+![Curvas de loss del MLP por activación, animado](reports/figures/mlp_loss_curves_animated.gif)
+
 ![Curvas de loss del MLP por activación](reports/figures/mlp_loss_curves.png)
 
 Los tres gráficos se regeneran en cada corrida de `main.py`

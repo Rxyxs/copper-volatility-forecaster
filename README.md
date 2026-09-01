@@ -263,6 +263,10 @@ CatBoost/GARCH refitting in a low-latency serving context.
 
 ![Residual distribution](reports/figures/residual_distribution.png)
 
+The animated version below traces each activation's train/val loss epoch by epoch, with a live-updating value label at the leading edge of every line.
+
+![MLP loss curves by activation, animated](reports/figures/mlp_loss_curves_animated.gif)
+
 ![MLP loss curves by activation](reports/figures/mlp_loss_curves.png)
 
 All three plots are regenerated on every `main.py` run (`src/plots.py`,

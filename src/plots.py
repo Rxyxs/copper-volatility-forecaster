@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+from matplotlib.animation import FuncAnimation
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -79,6 +80,85 @@ def plot_residual_distribution(
     path = out_dir / filename
     fig.savefig(path, dpi=150)
     plt.close(fig)
+    return path
+
+
+def _subsample(values: list[float], max_points: int = 50) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if len(arr) <= max_points:
+        return arr
+    idx = np.linspace(0, len(arr) - 1, max_points).round().astype(int)
+    return arr[idx]
+
+
+def plot_mlp_loss_curves_animated(
+    loss_histories: dict[str, dict[str, list[float]]], filename: str = "mlp_loss_curves_animated.gif"
+) -> Path:
+    """Racing-line GIF version of `plot_mlp_loss_curves`: progressively draws
+    the real train/val loss curves (subsampled if long) with a floating
+    label at the advancing tip of each line showing the series name and
+    current loss value. Uses the same `loss_histories` data as the static
+    PNG -- no fabricated numbers."""
+    out_dir = _ensure_dir()
+
+    series = []
+    for activation, hist in loss_histories.items():
+        color = COLORS.get(activation, "#6b7280")
+        series.append((f"{activation} (train)", _subsample(hist["train_loss_history"]), color, "-"))
+        series.append((f"{activation} (val)", _subsample(hist["val_loss_history"]), color, "--"))
+
+    n_frames = min(60, max(len(s[1]) for s in series))
+    n_frames = max(n_frames, 2)
+
+    all_x_max = max(len(s[1]) for s in series)
+    all_y = np.concatenate([s[1] for s in series])
+    y_lo, y_hi = float(all_y.min()), float(all_y.max())
+    pad = (y_hi - y_lo) * 0.1 or 0.05
+
+    with plt.style.context("dark_background"):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        lines = []
+        labels = []
+        for name, ys, color, style in series:
+            (line,) = ax.plot([], [], color=color, linestyle=style, linewidth=2, label=name)
+            lines.append(line)
+            label = ax.annotate(
+                "",
+                xy=(0, 0),
+                xytext=(10, 0),
+                textcoords="offset points",
+                fontsize=8,
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.3", fc=color, ec="none", alpha=0.85),
+            )
+            labels.append(label)
+
+        ax.set_xlim(1, all_x_max)
+        ax.set_ylim(y_lo - pad, y_hi + pad)
+        ax.set_xlabel("Epoch (subsampled)")
+        ax.set_ylabel("Huber + RMSPE loss")
+        ax.set_title("MLP training curves by activation function (animated)")
+        ax.legend(fontsize=7, loc="upper right")
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+
+        def update(frame):
+            step = frame + 1
+            for (name, ys, color, style), line, label in zip(series, lines, labels):
+                n = max(1, round(step / n_frames * len(ys)))
+                n = min(n, len(ys))
+                xs = np.arange(1, n + 1)
+                line.set_data(xs, ys[:n])
+                cur_x, cur_y = xs[-1], ys[n - 1]
+                label.xy = (cur_x, cur_y)
+                label.set_text(f"{name}: {cur_y:.4f}")
+            return lines + labels
+
+        ani = FuncAnimation(fig, update, frames=n_frames, interval=120, blit=False)
+        path = out_dir / filename
+        ani.save(path, writer="pillow")
+        plt.close(fig)
+
     return path
 
 
