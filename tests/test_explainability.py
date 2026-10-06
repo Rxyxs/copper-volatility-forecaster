@@ -1,13 +1,13 @@
 import numpy as np
 
-from src.data import generate_synthetic_copper_market
 from src.explainability import compute_shap_values, global_importance_by_feature, global_importance_by_group
 from src.features import build_features_and_target
 from src.modeling import fit_final_model
+from tests.helpers import make_market
 
 
 def _fitted_model_and_data():
-    market = generate_synthetic_copper_market(n_days=1000, seed=41)
+    market = make_market(n_days=1000, seed=41)
     df, feature_cols, feature_groups = build_features_and_target(market)
     params = {"iterations": 100, "learning_rate": 0.1, "depth": 4}
     model = fit_final_model(df, feature_cols, "target_fwd_realized_vol", params)

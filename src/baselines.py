@@ -1,18 +1,19 @@
-"""Econometric baselines for forward realized-volatility forecasting.
+"""Econometric and naive baselines for forward realized-volatility forecasting.
 
-Both baselines are evaluated on the *identical* `TimeSeriesSplit` folds used
-for CatBoost (see `src/modeling.py`), so the RMSE/MAE comparison in the
-README and notebook is apples-to-apples: same train/validation boundaries,
-same forward-volatility target, same forecast horizon.
+All of them are evaluated on the *identical* `TimeSeriesSplit` folds used for CatBoost (see
+`src/modeling.py`), with the same target and the same information cutoff (returns through
+day i-1 for row i):
 
-    - **HAR-RV** (Corsi, 2009): OLS of forward realized vol on the canonical
-      daily / weekly / monthly realized-vol components. A linear,
-      interpretable, well-established volatility-forecasting baseline.
-    - **GARCH(1,1)**: fit on training-fold returns only (`arch` package,
-      zero-mean, no macro/volume inputs -- the classic univariate baseline),
-      then produces a genuine walk-forward, non-refitting multi-step
-      forecast for every day in the validation fold via `last_obs`/`start`,
-      not a single static forecast repeated across the fold.
+    - **Naive (persistence)**: the next five days will be as volatile as the last five. The
+      bar any model has to clear before it is worth anything.
+    - **EWMA** (RiskMetrics, lambda = 0.94): an exponentially weighted variance with no
+      estimated parameters, the industry default for daily risk.
+    - **HAR-RV** (Corsi, 2009): OLS of forward realized vol on the canonical daily / weekly /
+      monthly realized-vol components; **HAR-X** adds the VIX level and the dollar index's
+      20-day volatility, two regressors fixed before seeing any result.
+    - **GARCH(1,1)**: fit on training-fold returns only (`arch` package, zero-mean, normal
+      errors, no macro inputs), then a genuine walk-forward, non-refitting multi-step
+      forecast for every day in the validation fold via `last_obs`/`start`.
 """
 
 from __future__ import annotations
@@ -22,11 +23,41 @@ import polars as pl
 import statsmodels.api as sm
 from arch import arch_model
 
-HAR_COLUMNS = ["har_rv_daily", "har_rv_weekly", "har_rv_monthly"]
+from src.features import HAR_COLUMNS
+
+EWMA_LAMBDA = 0.94
+EWMA_WARMUP = 20  # returns used to seed the recursion; they sit inside the first training fold
 
 
-def har_rv_predict_fold(df: pl.DataFrame, train_idx: np.ndarray, val_idx: np.ndarray, target_col: str) -> np.ndarray:
-    X = df.select(HAR_COLUMNS).to_numpy()
+def naive_predict_fold(df: pl.DataFrame, val_idx: np.ndarray) -> np.ndarray:
+    """Realized volatility of the last five returns (t-5 .. t-1)."""
+    return df["realized_vol_5d"].to_numpy()[val_idx]
+
+
+def ewma_forecast(log_returns: np.ndarray, lam: float = EWMA_LAMBDA, warmup: int = EWMA_WARMUP) -> np.ndarray:
+    """RiskMetrics volatility for every row: sigma2[i] = lam*sigma2[i-1] + (1-lam)*r[i-1]**2.
+
+    Nothing is estimated, so it runs over the whole series at once; row i only uses
+    returns through i-1. The forecast is flat over the horizon (EWMA has no mean
+    reversion), so it is directly comparable with the 5-day target.
+    """
+    squared = np.asarray(log_returns, dtype=float) ** 2
+    variance = np.empty_like(squared)
+    variance[0] = squared[:warmup].mean()
+    for i in range(1, len(squared)):
+        variance[i] = lam * variance[i - 1] + (1.0 - lam) * squared[i - 1]
+    return np.sqrt(variance)
+
+
+def har_rv_predict_fold(
+    df: pl.DataFrame,
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    target_col: str,
+    columns: list[str] | None = None,
+) -> np.ndarray:
+    """OLS on the HAR components (or on ``columns``, for the HAR-X variant with macro inputs)."""
+    X = df.select(columns or HAR_COLUMNS).to_numpy()
     y = df.select(target_col).to_numpy().ravel()
 
     X_train = sm.add_constant(X[train_idx], has_constant="add")

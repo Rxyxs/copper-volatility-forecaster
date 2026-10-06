@@ -1,14 +1,14 @@
 """Optuna hyperparameter search for the CatBoost volatility model.
 
-Tunes on a **single chronological holdout split** (last `val_fraction` of
-the series), not the full 5-fold walk-forward CV -- running an Optuna trial
-per fold per trial would multiply the tuning cost by `n_splits` for a
-search that, in practice, mostly finds the same handful of well-generalizing
-regions. This is a pragmatic, explicitly-documented choice (see the README's
-methodology section): the best hyperparameters found here are then evaluated
-across all 5 walk-forward folds for the final leaderboard, so the *reported*
-comparison against GARCH/HAR-RV is still a full walk-forward evaluation --
-only the *search* itself uses one split.
+The search never sees the data a model is scored on. Inside the walk-forward comparison
+(`src/modeling.py`) it runs once per fold, on that fold's training rows only: the last
+``EARLY_STOP_FRACTION`` of them is the holdout that both Optuna and CatBoost's early
+stopping look at, and the validation fold stays untouched until the final score. An
+earlier version tuned once on the last 20% of the whole series and early-stopped on the
+validation fold itself, which let the scored data choose the model; that is gone.
+
+`run_optuna_search` (one search on the full series) is only used for the descriptive
+SHAP model, which is not scored.
 """
 
 from __future__ import annotations
@@ -19,25 +19,26 @@ import polars as pl
 from catboost import CatBoostRegressor, Pool
 
 SEED = 42
+EARLY_STOP_FRACTION = 0.2
+EARLY_STOPPING_ROUNDS = 50
 
 
-def run_optuna_search(
-    df: pl.DataFrame,
+def split_for_early_stopping(n_rows: int, fraction: float = EARLY_STOP_FRACTION) -> int:
+    """Index where the chronological holdout of a training block starts."""
+    return int(n_rows * (1 - fraction))
+
+
+def tune_catboost(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_holdout: np.ndarray,
+    y_holdout: np.ndarray,
     feature_cols: list[str],
-    target_col: str,
     n_trials: int = 30,
-    val_fraction: float = 0.2,
     seed: int = SEED,
 ) -> optuna.Study:
-    X = df.select(feature_cols).to_numpy()
-    y = df.select(target_col).to_numpy().ravel()
-
-    split = int(len(X) * (1 - val_fraction))
-    X_train, X_val = X[:split], X[split:]
-    y_train, y_val = y[:split], y[split:]
-
     train_pool = Pool(X_train, y_train, feature_names=feature_cols)
-    val_pool = Pool(X_val, y_val, feature_names=feature_cols)
+    holdout_pool = Pool(X_holdout, y_holdout, feature_names=feature_cols)
 
     def objective(trial: optuna.Trial) -> float:
         params = {
@@ -49,11 +50,25 @@ def run_optuna_search(
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 2.0),
         }
         model = CatBoostRegressor(loss_function="RMSE", random_seed=seed, verbose=False, **params)
-        model.fit(train_pool, eval_set=val_pool, early_stopping_rounds=50)
-        preds = model.predict(X_val)
-        return float(np.sqrt(np.mean((preds - y_val) ** 2)))
+        model.fit(train_pool, eval_set=holdout_pool, early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+        preds = model.predict(X_holdout)
+        return float(np.sqrt(np.mean((preds - y_holdout) ** 2)))
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study
+
+
+def run_optuna_search(
+    df: pl.DataFrame,
+    feature_cols: list[str],
+    target_col: str,
+    n_trials: int = 30,
+    val_fraction: float = EARLY_STOP_FRACTION,
+    seed: int = SEED,
+) -> optuna.Study:
+    X = df.select(feature_cols).to_numpy()
+    y = df.select(target_col).to_numpy().ravel()
+    split = split_for_early_stopping(len(X), val_fraction)
+    return tune_catboost(X[:split], y[:split], X[split:], y[split:], feature_cols, n_trials=n_trials, seed=seed)

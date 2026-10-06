@@ -1,12 +1,12 @@
 import numpy as np
 
 from src.baselines import garch_predict_fold, har_rv_predict_fold
-from src.data import generate_synthetic_copper_market
 from src.features import build_features_and_target
+from tests.helpers import make_market
 
 
 def _sample_df():
-    market = generate_synthetic_copper_market(n_days=1200, seed=11)
+    market = make_market(n_days=1200, seed=11)
     df, feature_cols, _ = build_features_and_target(market)
     return df
 
@@ -60,3 +60,29 @@ def test_garch_predict_fold_matches_catboost_information_cutoff():
     corrupted_prior_day[train_idx[-1]] = 10.0
     preds_prior_day = garch_predict_fold(corrupted_prior_day, train_idx, val_idx, horizon=5)
     assert preds[0] != preds_prior_day[0], "GARCH forecast ignored information from day i-1 (should use it)"
+
+
+def test_naive_forecast_is_the_last_five_days_realized_vol():
+    from src.baselines import naive_predict_fold
+
+    df = _sample_df()
+    val_idx = np.arange(100, 110)
+    returns = df["log_return"].to_numpy()
+    preds = naive_predict_fold(df, val_idx)
+    # row i's trailing window is returns i-5..i-1 of the full copper series; inside the
+    # modelling frame (no holes in the synthetic market) that is the previous five rows
+    for k, i in enumerate(val_idx):
+        assert np.isclose(preds[k], np.sqrt(np.mean(returns[i - 5 : i] ** 2)))
+
+
+def test_ewma_forecast_is_causal():
+    from src.baselines import ewma_forecast
+
+    rng = np.random.default_rng(0)
+    returns = rng.normal(0, 0.01, 300)
+    base = ewma_forecast(returns)
+    shocked = returns.copy()
+    shocked[150] = 0.2
+    after = ewma_forecast(shocked)
+    assert np.array_equal(base[:151], after[:151]), "row i used its own return"
+    assert after[151] > base[151]

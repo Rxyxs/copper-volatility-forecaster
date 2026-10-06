@@ -1,5 +1,5 @@
-"""DuckDB persistence for the three-way model comparison (CatBoost, GARCH,
-HAR-RV, MLP-by-activation). Writes comparative walk-forward metrics to a
+"""DuckDB persistence for the model comparison (CatBoost, GARCH, HAR-RV,
+EWMA, persistence, MLP-by-activation). Writes comparative walk-forward metrics to a
 local `outputs/comparison_metrics.duckdb` file so results from separate runs
 can be queried/joined without re-running the pipeline.
 """
@@ -39,6 +39,7 @@ def get_connection(db_path: Path = DB_PATH) -> duckdb.DuckDBPyConnection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
     con.execute(_CREATE_METRICS_TABLE)
+    con.execute("ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS qlike_mean DOUBLE")
     con.execute(_CREATE_PREDICTIONS_TABLE)
     return con
 
@@ -54,7 +55,8 @@ def persist_comparison(
     name -> (preds, actual) arrays for one representative fold."""
     for model, m in metrics.items():
         con.execute(
-            "INSERT INTO model_metrics VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO model_metrics (run_id, model, rmse_mean, rmse_std, mae_mean, mae_std, "
+            "latency_ms_per_sample, qlike_mean) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 run_id,
                 model,
@@ -63,6 +65,7 @@ def persist_comparison(
                 m.get("mae_mean"),
                 m.get("mae_std"),
                 m.get("latency_ms_per_sample"),
+                m.get("qlike_mean"),
             ],
         )
 
@@ -76,7 +79,7 @@ def load_latest_comparison(con: duckdb.DuckDBPyConnection):
     RMSE (best first) -- the query behind the README comparison table."""
     return con.execute(
         """
-        SELECT model, rmse_mean, rmse_std, mae_mean, mae_std, latency_ms_per_sample
+        SELECT model, rmse_mean, rmse_std, mae_mean, mae_std, qlike_mean, latency_ms_per_sample
         FROM model_metrics
         WHERE run_id = (SELECT max(run_id) FROM model_metrics)
         ORDER BY rmse_mean ASC

@@ -6,7 +6,8 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Data / artifacts
+# Data / artifacts (raw downloads are re-fetched with `python main.py --download`)
+data/raw/
 data/*.csv
 data/*.parquet
 *.cbm

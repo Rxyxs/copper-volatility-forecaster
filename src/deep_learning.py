@@ -10,7 +10,7 @@ folds, so the three-way comparison (CatBoost / GARCH+HAR-RV / MLP) is
 apples-to-apples: same features, same target, same folds.
 
 Loss: `HuberRMSPELoss` combines a Huber term (robust to the rare large
-volatility spikes injected in `src/data.py`'s GARCH-X process) with an
+volatility spikes of the real series, such as March 2020) with an
 RMSPE-style relative term (volatility forecasts are evaluated relatively as
 often as absolutely -- a miss of 0.001 matters a lot more in a low-vol
 regime than a high-vol one).
@@ -26,6 +26,9 @@ import torch
 from sklearn.model_selection import TimeSeriesSplit
 from torch import nn
 
+from src.metrics import qlike
+from src.tuning import split_for_early_stopping
+
 SEED = 42
 ACTIVATIONS = ("relu", "gelu", "swish")
 HIDDEN_DIMS = (64, 32)
@@ -33,6 +36,7 @@ EPOCHS = 60
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-5
+EARLY_STOP_PATIENCE = 10
 
 
 def _activation_module(name: str) -> nn.Module:
@@ -49,9 +53,16 @@ class HuberRMSPELoss(nn.Module):
     """Huber loss (robust to rare large-volatility spikes) plus an RMSPE-style
     relative term, since volatility forecasts matter proportionally: a fixed
     absolute error is a much larger relative miss in a low-vol regime than a
-    high-vol one."""
+    high-vol one.
 
-    def __init__(self, delta: float = 0.01, rmspe_weight: float = 0.3, eps: float = 1e-6):
+    `train_mlp` feeds it the target divided by its training-fold mean, so a
+    typical day is ~1 and both terms weigh what `rmspe_weight` says. On raw
+    daily volatilities (~0.01) the Huber term is ~1e-5 against ~0.1 for the
+    relative one: the network trains on the relative term alone, which
+    rewards forecasting too little. An earlier version did exactly that and
+    forecast about half the realized volatility."""
+
+    def __init__(self, delta: float = 1.0, rmspe_weight: float = 0.3, eps: float = 1e-6):
         super().__init__()
         self.huber = nn.HuberLoss(delta=delta)
         self.rmspe_weight = rmspe_weight
@@ -101,18 +112,31 @@ def train_mlp(
     batch_size: int = BATCH_SIZE,
     lr: float = LEARNING_RATE,
     seed: int = SEED,
+    patience: int = EARLY_STOP_PATIENCE,
 ) -> dict:
     """Trains one `MLPVolatilityForecaster` and returns predictions, per-epoch
     train/val loss history, and wall-clock inference latency (used for the
-    README's latency column)."""
+    README's latency column).
+
+    Same protocol as CatBoost: the last part of the *training* block is a
+    holdout, training stops once its loss has not improved for `patience`
+    epochs, and the weights of its best epoch are kept. The validation fold is
+    only scored, never used to stop (its per-epoch loss is logged for the
+    plots). With a fixed 60 epochs and no stopping, the validation loss
+    bottomed near epoch 20 and climbed after it.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     Xtr, Xval = _standardize(X_train, X_val)
-    Xtr_t = torch.tensor(Xtr, dtype=torch.float32)
-    ytr_t = torch.tensor(y_train, dtype=torch.float32)
+    scale = float(np.mean(y_train))  # training fold only; see HuberRMSPELoss
+    cut = split_for_early_stopping(len(Xtr))
+    Xtr_t = torch.tensor(Xtr[:cut], dtype=torch.float32)
+    ytr_t = torch.tensor(y_train[:cut] / scale, dtype=torch.float32)
+    Xhold_t = torch.tensor(Xtr[cut:], dtype=torch.float32)
+    yhold_t = torch.tensor(y_train[cut:] / scale, dtype=torch.float32)
     Xval_t = torch.tensor(Xval, dtype=torch.float32)
-    yval_t = torch.tensor(y_val, dtype=torch.float32)
+    yval_t = torch.tensor(y_val / scale, dtype=torch.float32)
 
     model = MLPVolatilityForecaster(n_features=X_train.shape[1], activation=activation)
     criterion = HuberRMSPELoss()
@@ -120,9 +144,11 @@ def train_mlp(
 
     n = Xtr_t.shape[0]
     train_losses: list[float] = []
+    holdout_losses: list[float] = []
     val_losses: list[float] = []
+    best_state, best_holdout, best_epoch, epochs_without_gain = None, float("inf"), 0, 0
 
-    for _epoch in range(epochs):
+    for epoch in range(epochs):
         model.train()
         perm = torch.randperm(n)
         epoch_loss = 0.0
@@ -139,19 +165,30 @@ def train_mlp(
 
         model.eval()
         with torch.no_grad():
-            val_preds = model(Xval_t)
-            val_losses.append(criterion(val_preds, yval_t).item())
+            holdout_losses.append(criterion(model(Xhold_t), yhold_t).item())
+            val_losses.append(criterion(model(Xval_t), yval_t).item())
 
+        if holdout_losses[-1] < best_holdout:
+            best_holdout, best_epoch, epochs_without_gain = holdout_losses[-1], epoch + 1, 0
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        else:
+            epochs_without_gain += 1
+            if epochs_without_gain >= patience:
+                break
+
+    model.load_state_dict(best_state)
     model.eval()
     start_t = time.perf_counter()
     with torch.no_grad():
-        final_val_preds = model(Xval_t).numpy()
+        final_val_preds = model(Xval_t).numpy() * scale
     latency_ms_per_sample = ((time.perf_counter() - start_t) / max(len(y_val), 1)) * 1000.0
 
     return {
         "preds": final_val_preds,
         "train_loss_history": train_losses,
+        "holdout_loss_history": holdout_losses,
         "val_loss_history": val_losses,
+        "best_epoch": best_epoch,
         "latency_ms_per_sample": latency_ms_per_sample,
         "model": model,
     }
@@ -185,8 +222,9 @@ def run_activation_comparison(
     tscv = TimeSeriesSplit(n_splits=n_splits)
     folds = list(tscv.split(X))
 
-    results: dict[str, dict] = {act: {"rmse": [], "mae": []} for act in activations}
+    results: dict[str, dict] = {act: {"rmse": [], "mae": [], "qlike": []} for act in activations}
     last_fold_detail: dict[str, dict] = {}
+    oos_preds: dict[str, list[np.ndarray]] = {act: [] for act in activations}
 
     for activation in activations:
         for fold_i, (train_idx, val_idx) in enumerate(folds, start=1):
@@ -195,12 +233,17 @@ def run_activation_comparison(
             )
             results[activation]["rmse"].append(_rmse(out["preds"], y[val_idx]))
             results[activation]["mae"].append(_mae(out["preds"], y[val_idx]))
+            results[activation]["qlike"].append(qlike(out["preds"], y[val_idx]))
+            results[activation].setdefault("best_epoch", []).append(out["best_epoch"])
+            oos_preds[activation].append(np.asarray(out["preds"], dtype=float))
             if fold_i == len(folds):
                 last_fold_detail[activation] = {
                     "preds": out["preds"],
                     "actual": y[val_idx],
                     "train_loss_history": out["train_loss_history"],
+                    "holdout_loss_history": out["holdout_loss_history"],
                     "val_loss_history": out["val_loss_history"],
+                    "best_epoch": out["best_epoch"],
                     "latency_ms_per_sample": out["latency_ms_per_sample"],
                 }
         print(
@@ -214,8 +257,12 @@ def run_activation_comparison(
             "rmse_std": float(np.std(vals["rmse"])),
             "mae_mean": float(np.mean(vals["mae"])),
             "mae_std": float(np.std(vals["mae"])),
+            "qlike_mean": float(np.mean(vals["qlike"])),
+            "qlike_std": float(np.std(vals["qlike"])),
             "rmse_per_fold": vals["rmse"],
             "mae_per_fold": vals["mae"],
+            "qlike_per_fold": vals["qlike"],
+            "best_epoch_per_fold": vals["best_epoch"],
             "latency_ms_per_sample": last_fold_detail[act]["latency_ms_per_sample"],
         }
         for act, vals in results.items()
@@ -226,4 +273,5 @@ def run_activation_comparison(
         "best_activation": best_activation,
         "best_detail": last_fold_detail[best_activation],
         "all_detail": last_fold_detail,
+        "oos_pred": {act: np.concatenate(parts) for act, parts in oos_preds.items()},
     }

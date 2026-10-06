@@ -3,8 +3,8 @@
 CatBoost is a tree ensemble, so `shap.TreeExplainer` gives exact (not
 approximate) Shapley values efficiently -- no KernelSHAP/DeepSHAP tradeoffs
 needed here. This module computes both global importance (mean |SHAP| per
-feature and per feature *group* -- return/volume/macro/calendar, to directly
-answer "how much weight do macro and volume variables carry?") and local
+feature and per feature *group* -- return/macro/calendar, to directly
+answer "how much weight do the VIX and the dollar index carry?") and local
 (single-instance) attribution.
 """
 
@@ -36,9 +36,9 @@ def global_importance_by_feature(shap_values: np.ndarray, feature_cols: list[str
 def global_importance_by_group(
     shap_values: np.ndarray, feature_cols: list[str], feature_groups: dict[str, list[str]]
 ) -> pd.DataFrame:
-    """Sums mean |SHAP| within each feature group (return/volume/macro/
-    calendar) and reports each group's share of total importance -- the
-    direct answer to "how much weight do macro and volume variables carry?"
+    """Sums mean |SHAP| within each feature group (return/macro/calendar)
+    and reports each group's share of total importance -- the direct answer
+    to "how much weight do the macro variables carry?"
     """
     importance = global_importance_by_feature(shap_values, feature_cols).set_index("feature")["mean_abs_shap"]
     rows = []

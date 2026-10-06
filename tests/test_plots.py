@@ -40,3 +40,29 @@ def test_plot_mlp_loss_curves_writes_file(tmp_path, monkeypatch):
     path = plot_mlp_loss_curves(histories, filename="loss.png")
     assert path.exists()
     assert path.stat().st_size > 0
+
+
+def test_new_real_data_plots_write_files(tmp_path, monkeypatch):
+    import datetime as dt
+
+    import src.plots as plots_module
+    from src.plots import plot_forecasts_last_fold, plot_model_comparison, plot_price_and_vol
+
+    monkeypatch.setattr(plots_module, "PLOTS_DIR", tmp_path)
+    dates = np.array([np.datetime64(dt.date(2020, 1, 1)) + i for i in range(200)])
+    rng = np.random.default_rng(1)
+    vol = np.abs(rng.normal(20, 5, 200))
+    paths = [
+        plot_price_and_vol(dates, 3 + rng.normal(0, 0.1, 200).cumsum(), vol, filename="series.png"),
+        plot_forecasts_last_fold(dates, vol, {"garch": vol * 0.9, "naive": vol * 1.1}, filename="fc.png"),
+        plot_model_comparison(
+            {
+                "garch": {"rmse": [0.9, 0.95], "qlike": [0.8, 0.9]},
+                "catboost": {"rmse": [1.0, 0.97], "qlike": [1.1, 0.9]},
+                "naive": {"rmse": [1.0, 1.0], "qlike": [1.0, 1.0]},
+            },
+            filename="cmp.png",
+        ),
+    ]
+    for path in paths:
+        assert path.exists() and path.stat().st_size > 0

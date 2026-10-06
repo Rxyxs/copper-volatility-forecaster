@@ -1,6 +1,7 @@
-"""Explanatory plots for the three-way model comparison (CatBoost, GARCH/
-HAR-RV baselines, PyTorch MLP): predicted-vs-actual, residual distribution,
-and MLP loss curves by activation function. Written to `outputs/plots/`.
+"""Explanatory plots: the real copper series and its volatility, out-of-sample forecasts,
+the model comparison against persistence, and the PyTorch MLP diagnostics
+(predicted-vs-actual, residual distribution, loss curves by activation function).
+Written to `outputs/plots/`; `main.py` copies them to `reports/figures/` for the README.
 """
 
 from __future__ import annotations
@@ -20,10 +21,31 @@ COLORS = {
     "catboost": "#d97706",
     "garch": "#2563eb",
     "har_rv": "#16a34a",
+    "catboost_no_macro": "#f5b759",
+    "har_rv_macro": "#0f766e",
+    "ewma": "#7c3aed",
+    "naive": "#6b7280",
+    "mlp_relu": "#dc2626",
+    "mlp_gelu": "#dc2626",
+    "mlp_swish": "#dc2626",
     "mlp": "#dc2626",
     "relu": "#2563eb",
     "gelu": "#dc2626",
     "swish": "#16a34a",
+}
+
+
+LABELS = {
+    "catboost": "CatBoost (Optuna, per fold)",
+    "catboost_no_macro": "CatBoost without VIX or dollar",
+    "garch": "GARCH(1,1)",
+    "har_rv": "HAR-RV",
+    "har_rv_macro": "HAR-X (HAR-RV + VIX, dollar)",
+    "ewma": "EWMA (RiskMetrics)",
+    "naive": "Persistence (last 5 days)",
+    "mlp_relu": "MLP (ReLU)",
+    "mlp_gelu": "MLP (GELU)",
+    "mlp_swish": "MLP (Swish)",
 }
 
 
@@ -48,9 +70,9 @@ def plot_predicted_vs_actual(
         ax.scatter(actual, preds, alpha=0.35, s=14, color=color, edgecolors="none")
         lo, hi = float(min(actual.min(), preds.min())), float(max(actual.max(), preds.max()))
         ax.plot([lo, hi], [lo, hi], linestyle="--", color="#6b7280", linewidth=1)
-        ax.set_title(name)
-        ax.set_xlabel("Actual forward realized vol")
-        ax.set_ylabel("Predicted forward realized vol")
+        ax.set_title(LABELS.get(name, name))
+        ax.set_xlabel("Realized volatility, next 5 days (annualized, %)")
+        ax.set_ylabel("Forecast (annualized, %)")
         ax.grid(alpha=0.25)
 
     fig.suptitle("Predicted vs. actual forward realized volatility (last walk-forward fold)")
@@ -69,9 +91,9 @@ def plot_residual_distribution(
     for name, (preds, actual) in predictions.items():
         residuals = preds - actual
         color = COLORS.get(name, "#6b7280")
-        ax.hist(residuals, bins=40, alpha=0.45, label=name, color=color, density=True)
+        ax.hist(residuals, bins=40, alpha=0.45, label=LABELS.get(name, name), color=color, density=True)
     ax.axvline(0.0, color="#111827", linewidth=1, linestyle="--")
-    ax.set_xlabel("Residual (predicted - actual)")
+    ax.set_xlabel("Forecast minus realized (annualized volatility points)")
     ax.set_ylabel("Density")
     ax.set_title("Residual distribution by model (last walk-forward fold)")
     ax.legend()
@@ -174,11 +196,89 @@ def plot_mlp_loss_curves(
         epochs = range(1, len(hist["train_loss_history"]) + 1)
         ax.plot(epochs, hist["train_loss_history"], color=color, linestyle="-", label=f"{activation} (train)")
         ax.plot(epochs, hist["val_loss_history"], color=color, linestyle="--", label=f"{activation} (val)")
+        if hist.get("best_epoch"):
+            ax.axvline(hist["best_epoch"], color=color, linestyle=":", linewidth=1)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Huber + RMSPE loss")
-    ax.set_title("MLP training curves by activation function")
+    ax.set_title("MLP training curves by activation (dotted line: epoch kept by early stopping)")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.25)
+    fig.tight_layout()
+    path = out_dir / filename
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def plot_price_and_vol(dates, price, realized_vol_annual_pct, filename: str = "copper_price_and_vol.png") -> Path:
+    """The real series: LME copper price and its trailing 20-day realized volatility."""
+    out_dir = _ensure_dir()
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6.2), sharex=True, gridspec_kw={"height_ratios": [1.1, 1]})
+    ax1.plot(dates, price, color="#b45309", linewidth=1.1)
+    ax1.set_ylabel("USD per pound")
+    ax1.set_title("LME copper price (mindicador.cl) and its realized volatility")
+    ax1.grid(alpha=0.25)
+    ax2.plot(dates, realized_vol_annual_pct, color="#1f2937", linewidth=0.9)
+    ax2.set_ylabel("20-day realized vol\n(annualized, %)")
+    ax2.grid(alpha=0.25)
+    fig.tight_layout()
+    path = out_dir / filename
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def plot_forecasts_last_fold(
+    dates, actual_annual_pct, preds_annual_pct: dict[str, np.ndarray], filename: str = "forecasts_last_fold.png"
+) -> Path:
+    """Out-of-sample forecasts against the realized 5-day volatility, last walk-forward fold."""
+    out_dir = _ensure_dir()
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+    ax.plot(dates, actual_annual_pct, color="#9ca3af", linewidth=0.8, alpha=0.8, label="Realized (next 5 days)")
+    for name, preds in preds_annual_pct.items():
+        ax.plot(dates, preds, color=COLORS.get(name, "#6b7280"), linewidth=1.3, label=LABELS.get(name, name))
+    ax.set_ylabel("Volatility (annualized, %)")
+    ax.set_title("Out-of-sample forecasts, last walk-forward fold")
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    path = out_dir / filename
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def plot_model_comparison(
+    per_fold: dict[str, dict[str, list[float]]], baseline: str = "naive", filename: str = "model_comparison.png"
+) -> Path:
+    """RMSE and QLIKE of each model divided by the naive baseline's, fold by fold (below 1
+    = better than assuming the next five days look like the last five)."""
+    out_dir = _ensure_dir()
+
+    def mean_ratio(model: str) -> float:
+        return float(np.mean(np.asarray(per_fold[model]["qlike"]) / np.asarray(per_fold[baseline]["qlike"])))
+
+    models = sorted((m for m in per_fold if m != baseline), key=mean_ratio)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 0.55 * len(models) + 1.6), sharey=True)
+    for ax, metric, title in [(axes[0], "rmse", "RMSE / persistence"), (axes[1], "qlike", "QLIKE / persistence")]:
+        base = np.asarray(per_fold[baseline][metric])
+        for row, model in enumerate(models):
+            ratios = np.asarray(per_fold[model][metric]) / base
+            color = COLORS.get(model, "#6b7280")
+            ax.scatter(ratios, np.full(len(ratios), row), color=color, alpha=0.45, s=22, edgecolors="none")
+            ax.scatter([np.mean(ratios)], [row], color=color, s=70, marker="D", zorder=3)
+        ax.axvline(1.0, color="#111827", linewidth=1, linestyle="--")
+        ax.set_xscale("log")
+        candidates = (0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.25, 1.5, 2, 3, 4, 6, 8)
+        ticks = [t for t in candidates if ax.get_xlim()[0] <= t <= ax.get_xlim()[1]]
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f"{t:g}" for t in ticks])
+        ax.minorticks_off()
+        ax.set_title(title + "  (dots = folds, diamond = mean)", fontsize=10)
+        ax.grid(alpha=0.25, axis="x")
+    axes[0].set_yticks(range(len(models)))
+    axes[0].set_yticklabels([LABELS.get(m, m) for m in models])
+    axes[0].invert_yaxis()
     fig.tight_layout()
     path = out_dir / filename
     fig.savefig(path, dpi=150)

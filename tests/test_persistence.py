@@ -54,3 +54,12 @@ def test_persist_comparison_appends_across_runs(tmp_path):
 
     assert len(latest) == 1
     assert abs(latest.iloc[0]["rmse_mean"] - 0.009) < 1e-9  # only the most recent run_id
+
+
+def test_persist_comparison_stores_qlike(tmp_path):
+    con = get_connection(tmp_path / "q.duckdb")
+    metrics = {"garch": {"rmse_mean": 0.01, "rmse_std": 0.0, "mae_mean": 0.008, "mae_std": 0.0, "qlike_mean": 0.21}}
+    persist_comparison(con, dt.datetime(2026, 1, 3), metrics, {})
+    latest = load_latest_comparison(con)
+    con.close()
+    assert abs(latest.iloc[0]["qlike_mean"] - 0.21) < 1e-12
