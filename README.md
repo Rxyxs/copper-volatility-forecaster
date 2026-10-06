@@ -1,300 +1,165 @@
-<div align="center">
+**[English](README.md) | [Español](README.es.md)**
 
 # Copper Volatility Forecaster
 
-**[English](README.md) | [Español](README.es.md)**
+[![CI](https://github.com/Rxyxs/copper-volatility-forecaster/actions/workflows/ci.yml/badge.svg)](https://github.com/Rxyxs/copper-volatility-forecaster/actions/workflows/ci.yml) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue) ![Data](https://img.shields.io/badge/data-real%20(LME%20%2B%20FRED)-2ea44f) ![License](https://img.shields.io/badge/license-MIT-green)
 
-![Python](https://img.shields.io/badge/python-3.10-blue)
-![Polars](https://img.shields.io/badge/polars-1.44-orange)
-![CatBoost](https://img.shields.io/badge/catboost-1.2-yellow)
-![Optuna](https://img.shields.io/badge/optuna-4.9-9cf)
-![arch](https://img.shields.io/badge/arch-GARCH-red)
-![SHAP](https://img.shields.io/badge/shap-explainability-8A2BE2)
-![PyTorch](https://img.shields.io/badge/pytorch-MLP-EE4C2C)
-![DuckDB](https://img.shields.io/badge/duckdb-metrics%20store-FFF000)
-![Pytest](https://img.shields.io/badge/tests-25%20passing-brightgreen)
-![License](https://img.shields.io/badge/license-MIT-green)
+On 14 years of real London Metal Exchange copper prices, a GARCH(1,1) from 1986 forecasts next week's volatility as well as anything else I tested: a CatBoost tuned with Optuna inside every walk-forward fold does not beat it, and the only model that ties it is a linear HAR-RV with the VIX and the dollar index added.
 
-</div>
+## What I found
 
-## Overview
+| Finding | Evidence |
+|---|---|
+| **The 1986 model is still the one to beat** | Over 2,695 daily out-of-sample forecasts (July 2015 to September 2026), GARCH(1,1) has the lowest QLIKE, 0.380, and beats HAR-RV, EWMA and CatBoost on it (Diebold-Mariano p ≤ 0.022). On RMSE the four best models are statistically tied, between 8.59 and 8.86 annualized volatility points (p ≥ 0.22 against GARCH). |
+| **Gradient boosting adds nothing here** | CatBoost, re-tuned with Optuna inside every fold on training data only, ends at QLIKE 0.455, worse than GARCH (p = 0.022). Its early stopping keeps between 10 and 95 trees in four of the five folds: once recent volatility is known, there is little structure left to learn. |
+| **The VIX and the dollar help a little, not significantly** | SHAP puts 41% of the CatBoost model's weight on them, yet removing them worsens its QLIKE by only 4% (p = 0.33). Adding two of them to HAR-RV improves it by 9% (p = 0.13) and makes it the only model level with GARCH (p = 0.80). SHAP measures how much a model leans on a feature, not what the feature is worth. |
+| **Every model beats "next week looks like last week"** | Against persistence, the econometric models and CatBoost cut RMSE by about 20% and QLIKE by about 60% (p < 0.001). The best neural network also beats it, but only after fixing two training problems, and it is still the weakest of the serious models (QLIKE 0.647). |
+| **Most of a week's volatility is not forecastable** | No model explains as much as 10% of the variation in next week's realized volatility (Mincer-Zarnowitz R² below 0.10 for every one of them). The models track the *level* of risk; none anticipates a spike. |
 
-This project forecasts **forward realized volatility** of copper prices: given
-a history of daily prices, volume, and two macro proxies, the model estimates
-how volatile the price will be over the **next 5 trading days**. Volatility
-forecasts of this kind are a standard input to hedge sizing, options pricing,
-and risk-limit calibration for any desk or company with copper price exposure
-— a directly relevant problem for Chile as the world's largest copper
-producer, where mining revenue, national budget planning, and corporate
-hedging programs are all sensitive to copper price volatility.
+## Why copper volatility
 
-The forecasting model — a CatBoost regressor tuned with **Optuna** — is
-benchmarked against two classic econometric volatility baselines,
-**GARCH(1,1)** and **HAR-RV** (Corsi, 2009), on identical walk-forward folds.
-Explainability is computed with **SHAP** to quantify exactly how much
-predictive weight the macro and volume features carry versus the pure
-return-based ones.
+Chile is the world's largest copper producer, so the volatility of the copper price feeds directly into hedge sizing for mining companies and treasuries, the pricing of copper options and collars, and how conservatively revenue and fiscal projections are built. A five-day volatility forecast is the standard input for all three. The question here is whether machine learning improves on the classic econometric forecasts once the data is real and the evaluation is honest.
 
-## Business value
+## Data
 
-- **Risk sizing**: a forward volatility estimate lets a treasury or trading
-  desk size hedge positions (futures, options collars) to a target risk
-  budget instead of a static rule of thumb.
-- **Options pricing input**: realized-volatility forecasts are a direct input
-  to pricing and marking illiquid or OTC copper derivatives where an implied
-  volatility surface isn't readily available.
-- **Budget and planning sensitivity**: for copper-exporting operations,
-  knowing whether the market is entering a high- or low-volatility regime
-  informs how conservatively revenue and covenant projections should be
-  built.
-- **Macro-aware risk management**: quantifying how much of the volatility
-  signal actually comes from USD strength and global risk sentiment (versus
-  copper's own price action) tells a risk desk which external dashboards
-  are actually worth watching for this exposure.
+All three series are public, free and downloaded by the pipeline itself (`python main.py --download`). The analysis is frozen at `SAMPLE_END = 2026-10-02`, so rerunning it reproduces this README.
 
-## Business Impact & Key Performance Indicators
+| Series | Source | Coverage | How it is used |
+|---|---|---|---|
+| Copper price, USD per pound | [mindicador.cl](https://mindicador.cl) (`libra_cobre`) | 3,435 days, 2012-10-05 to 2026-10-02 | Daily log returns, the target and the return features |
+| VIX (CBOE) | [FRED](https://fred.stlouisfed.org/series/VIXCLS) `VIXCLS` | daily | Level and changes, only closes dated before the forecast day |
+| Broad U.S. dollar index (Federal Reserve) | [FRED](https://fred.stlouisfed.org/series/DTWEXBGS) `DTWEXBGS` | daily, published weekly | Log changes, only once the weekly release containing them is out |
 
-| Metric | Result | What it means |
-|---|---|---|
-| Best benchmark model | **GARCH(1,1)**, RMSE 0.007824 | Beats both HAR-RV (0.008076) and Optuna-tuned CatBoost (0.008163) -- reported honestly with the structural reason, not tuned to make ML win |
-| SHAP macro-signal weight | 10.81% (`usd_index`/`risk_proxy`) | Validated against a known ground truth -- these are the exact features injected as genuine variance drivers |
-| SHAP volume weight | 41.35% (largest group) | Consistent with volume being tied directly to the conditional-volatility path in the data-generating process |
-| HAR-RV vs. CatBoost gap | 0.008076 vs. 0.008163 RMSE | A 3-regressor linear model lands remarkably close to a tuned gradient booster -- realized-vol forecasting has strong classical baselines |
+The copper series is the London price, not New York's: in July 2025, when COMEX traded above 5.5 USD/lb on tariff fears, it stayed between 4.4 and 4.6 USD/lb, about 9,700 to 10,100 USD per tonne, the LME level. Four things in the data needed handling before any model, all done explicitly in `src/data.py` and tested:
 
+- **It follows the Chilean calendar.** On Chilean holidays the LME trades but the series has no value, so the next return spans more than one session: 95.3% of the returns cover one business day and 4.6% cover two to four. Those are kept as they are. Dividing them by the square root of the business days elapsed looks like the obvious fix, but it leaves them *less* volatile than an ordinary day (0.94% against 1.30% daily standard deviation), because many of those holidays are London holidays too. Doing it right needs the LME calendar, which is not in the data (see Roadmap).
+- **Two real holes**, 7 business days around Christmas 2014 and 18 in December 2017. A return across five or more business days is not a daily return, so it is set to null and never used.
+- **One duplicated day**, collapsed because both copies are identical (a day with two different prices would stop the pipeline).
+- **The dollar index arrives a week late.** The Federal Reserve publishes it once a week (H.10, Monday afternoon) with data through the previous Friday. Using the daily value would use information nobody had yet, so each row only sees values already released: between 4 and 10 days old.
 
-## Architecture
+There is no free daily volume series for LME copper (mindicador has none and stooq blocks scripted downloads), so the volume features of the first, simulated version of this project are gone.
 
-```mermaid
-flowchart LR
-    A["Synthetic copper market<br/>price, volume, usd_index, risk_proxy<br/>GARCH-X data.py"] --> B["Lookahead-safe features<br/>features.py"]
-    B --> C["Optuna search<br/>single chronological holdout<br/>tuning.py"]
-    C --> D["Walk-forward comparison<br/>5x TimeSeriesSplit<br/>modeling.py"]
-    B --> D
-    D --> E1["CatBoost (tuned)"]
-    D --> E2["GARCH(1,1)<br/>baselines.py"]
-    D --> E3["HAR-RV<br/>baselines.py"]
-    E1 --> F["RMSE / MAE<br/>leaderboard"]
-    E2 --> F
-    E3 --> F
-    D --> G["Final CatBoost<br/>full series"]
-    G --> H["SHAP TreeExplainer<br/>explainability.py<br/>global + local, by feature group"]
-```
+![Copper price and realized volatility](reports/figures/copper_price_and_vol.png)
 
-The pipeline has five stages:
+Fourteen years of the LME price and its 20-day realized volatility, which averages about 21% a year and spikes to 44% in April 2020 and 51% in November 2021, after the October 2021 squeeze on the LME's nearby contracts.
 
-1. **Data layer** (`src/data.py`) — generates a synthetic daily price,
-   volume, and macro series with a documented, injected causal structure
-   (GARCH-X: macro shocks feed the volatility equation with a one-day lag).
-2. **Feature engineering layer** (`src/features.py`, Polars) — builds
-   rolling return, volume, and macro features (every one computed strictly
-   from information available before the day being predicted), plus the
-   canonical HAR-RV daily/weekly/monthly components.
-3. **Hyperparameter tuning** (`src/tuning.py`) — Optuna (TPE sampler) tunes
-   CatBoost on a single chronological holdout split.
-4. **Walk-forward benchmark** (`src/modeling.py`, `src/baselines.py`) — the
-   tuned CatBoost, GARCH(1,1), and HAR-RV are all evaluated on the identical
-   5-fold `TimeSeriesSplit`, so the comparison is apples-to-apples.
-5. **Explainability** (`src/explainability.py`) — `shap.TreeExplainer` on
-   the final CatBoost model, with global importance aggregated both per
-   feature and per feature *group* (return / volume / macro / calendar).
+## Method
+
+- **Target:** realized volatility over the next five trading days, the root mean square of the daily log returns (reported annualized, ×√245.5, the observed days per year).
+- **Validation:** five expanding walk-forward folds (`TimeSeriesSplit`) of 539 days each. Every model sees the same folds and the same information cutoff: returns through the day before the forecast.
+- **Models:** persistence (the last five days), EWMA (RiskMetrics, λ = 0.94), GARCH(1,1), HAR-RV (Corsi, 2009), HAR-X (HAR-RV plus the VIX level and the dollar's 20-day volatility, chosen before seeing any result), CatBoost with 24 features, CatBoost without the 11 macro features, and a PyTorch MLP with three activations.
+- **No tuning on the scored data:** CatBoost is re-tuned with 30 Optuna trials inside every fold, on that fold's training block; the last 20% of the block is the holdout for both Optuna and early stopping. The MLP uses the same holdout to stop. A test rewrites a fold's validation targets and checks that its forecasts do not change.
+- **Metrics:** RMSE in annualized volatility points, and **QLIKE** (Patton, 2011) as the ranking metric. With a noisy proxy such as five-day realized volatility, QLIKE still ranks forecasts the way the true variance would, which RMSE on volatility does not guarantee, and it punishes under-forecasting risk harder than over-forecasting it. Differences are tested with Diebold-Mariano on the 2,695 pooled forecasts, with a Newey-West variance because consecutive five-day targets overlap.
+
+## Results
+
+| Model | RMSE (annualized vol. points) | QLIKE | RMSE vs. persistence | QLIKE vs. persistence |
+|---|---:|---:|---:|---:|
+| GARCH(1,1) | 8.79 | 0.380 | 0.80 | 0.36 |
+| HAR-X (HAR-RV + VIX, dollar) | 8.59 | 0.385 | 0.78 | 0.36 |
+| EWMA (RiskMetrics) | 9.21 | 0.417 | 0.83 | 0.39 |
+| HAR-RV | 8.66 | 0.422 | 0.79 | 0.40 |
+| CatBoost (Optuna, re-tuned per fold) | 8.86 | 0.455 | 0.80 | 0.43 |
+| CatBoost without VIX or dollar | 8.90 | 0.473 | 0.81 | 0.44 |
+| MLP (ReLU) | 9.45 | 0.647 | 0.86 | 0.61 |
+| MLP (GELU) | 9.64 | 0.686 | 0.87 | 0.64 |
+| MLP (Swish) | 9.73 | 0.724 | 0.88 | 0.68 |
+| Persistence (last 5 days) | 11.03 | 1.066 | 1.00 | 1.00 |
+
+Sorted by QLIKE. Below 1 in the last two columns means better than assuming the next five days will look like the last five.
+
+| Comparison (Diebold-Mariano) | p-value, QLIKE | p-value, RMSE | Reading |
+|---|---:|---:|---|
+| HAR-X vs. GARCH(1,1) | 0.798 | 0.396 | Tie |
+| CatBoost vs. GARCH(1,1) | 0.022 | 0.703 | GARCH better on QLIKE, tie on RMSE |
+| HAR-RV vs. GARCH(1,1) | < 0.001 | 0.218 | GARCH better on QLIKE, tie on RMSE |
+| EWMA vs. GARCH(1,1) | < 0.001 | < 0.001 | GARCH better |
+| CatBoost vs. CatBoost without VIX or dollar | 0.334 | 0.735 | No detectable gain from the macro inputs |
+| HAR-X vs. HAR-RV | 0.127 | 0.763 | No detectable gain from the macro inputs |
+| MLP (ReLU) vs. persistence | < 0.001 | < 0.001 | MLP better |
+
+![Model comparison against persistence](reports/figures/model_comparison.png)
+
+Each model's RMSE and QLIKE divided by persistence's, fold by fold, on a log scale: GARCH, HAR-X, HAR-RV and EWMA cluster together, CatBoost keeps up on RMSE but trails on QLIKE, and the MLPs sit closest to persistence.
+
+![Forecasts in the last fold](reports/figures/forecasts_last_fold.png)
+
+The last fold, July 2024 to September 2026: the three best models follow the level of volatility, but none sees a spike coming, the April 2025 one included; they react afterwards. That is the limit of what a five-day volatility forecast can do.
+
+## What the VIX and the dollar add
+
+| Feature group | Share of SHAP weight |
+|---|---:|
+| Return | 57.94% |
+| Macro (VIX, dollar index) | 41.32% |
+| Calendar | 0.74% |
+
+On the full-series CatBoost model, the 60-day realized volatility is the single most important feature, followed by the 20-day volatility of the VIX's daily changes. Read alone, that would say the macro inputs matter a lot. The ablations say otherwise: CatBoost without them is 4% worse on QLIKE and HAR-RV with two of them is 9% better, and neither difference is distinguishable from zero over eleven years of forecasts. The macro series move with copper's volatility, so a tree model happily uses them, but most of what they carry is already in copper's own recent volatility.
+
+## Third approach: PyTorch MLP (activation comparison)
+
+`src/deep_learning.py` trains a small feed-forward network (two hidden layers, Softplus output so forecasts stay positive) on the same 24 features, folds and target, with a Huber plus relative-error loss, and compares ReLU, GELU and Swish. On real data it exposed two problems that the first, simulated version of the project carried silently:
+
+- **The loss was mis-scaled.** On raw daily volatilities (around 0.01) the Huber term is about 0.00001 and the relative term about 0.1, so the network trained on the relative term alone, which rewards forecasting too little: it forecast about half the realized volatility (median 0.0058 against 0.0112) and almost zero on 12% of the days, which sent its QLIKE into the millions. The target is now divided by its training-fold mean, so both terms weigh what the design says.
+- **Sixty fixed epochs overfit.** The validation loss bottomed around epoch 20 and climbed after it. Training now stops on the last 20% of the training block, as CatBoost does, and keeps the best epoch: between 2 and 16 depending on fold and activation.
+
+With both fixed, the ReLU network beats persistence (QLIKE 0.647 against 1.066, p < 0.001) but remains the weakest of the serious models. With 2,700 days of noisy targets, a small network has no edge over a model with three parameters.
+
+![Predicted vs. actual](reports/figures/predicted_vs_actual.png)
+
+Forecasts against realized volatility in the last fold: every model compresses its forecasts into a narrow band, because most of a single week's volatility is noise that no forecast can follow.
+
+![Residual distribution](reports/figures/residual_distribution.png)
+
+The errors are skewed: the models over-forecast calm weeks by a few points and under-forecast the rare turbulent ones by much more, which is exactly what QLIKE penalizes.
+
+![MLP loss curves by activation, animated](reports/figures/mlp_loss_curves_animated.gif)
+
+Training and validation loss per epoch, drawn as the training happened.
+
+![MLP loss curves by activation](reports/figures/mlp_loss_curves.png)
+
+The same curves with the epoch kept by early stopping marked: training loss keeps falling while validation loss stays flat around 0.30 from the first epochs.
+
+## Avoiding lookahead bias
+
+1. **Copper features only use returns through the day before.** Every rolling window runs over `log_return.shift(1)`; a test perturbs one day's price and checks that the features for that day do not move while the next day's do.
+2. **Macro features are joined by publication date.** The VIX enters with closes up to the previous calendar day; the dollar index only once its weekly release is out. Both are tested by perturbing a value on the exact day it should, and should not, become visible.
+3. **GARCH has the same information cutoff as the features.** `arch`'s rolling forecast at origin *o* updates its variance with the return of day *o* itself (verified empirically, not assumed), so row *i*'s forecast is taken from origin *i−1*, asking for a (horizon+1)-step forecast and dropping its first step.
+4. **Nothing is tuned or stopped on the data it is scored on.** Optuna, CatBoost's early stopping and the MLP's early stopping all use the end of the training block; tests rewrite a fold's validation targets and check that its forecasts stay identical.
+
+## What changed from the first version
+
+The first version of this project ran on a simulated GARCH-X market, where GARCH won by construction. Moving it to real data changed more than the numbers:
+
+- **Data:** the real LME copper price, VIX and dollar index replace the simulated series; volume is gone because no free real series exists.
+- **Leakage removed:** CatBoost used to early-stop on the validation fold it was scored on, and Optuna tuned once on the last 20% of the series, which overlaps the last fold. Both now use only the training block of each fold.
+- **The MLP's loss scale and fixed epoch count** were fixed, as described above.
+- **Evaluation:** persistence, EWMA and HAR-X baselines, QLIKE, Diebold-Mariano tests and the macro ablation are new. The target is now the root mean square of the next five returns, the quantity a zero-mean GARCH forecasts, instead of their sample standard deviation.
+
+GARCH(1,1) still comes out on top, and this time not because the data was built for it.
 
 ## Technology stack
 
 | Layer | Technology | Role |
 |---|---|---|
-| Data manipulation | **Polars** | Fast, expression-based feature engineering over the price/return/volume/macro series |
-| Modeling | **CatBoost** | Gradient-boosted regressor for the volatility target |
-| Hyperparameter search | **Optuna** | TPE-sampler tuning on a chronological holdout split |
-| Econometric baselines | **arch** (GARCH), **statsmodels** (HAR-RV OLS) | Classic volatility-forecasting benchmarks, evaluated on identical walk-forward folds |
-| Validation | **scikit-learn** (`TimeSeriesSplit`) | Strict walk-forward cross-validation |
-| Explainability | **SHAP** (`TreeExplainer`) | Global (per-feature and per-group) and local (single-day) attribution |
-| Deep learning | **PyTorch** | Feed-forward MLP forecaster with a custom Huber+RMSPE loss, compared across ReLU/GELU/Swish activations |
-| Metrics persistence | **DuckDB** | Local columnar store for the comparative walk-forward metrics/predictions across runs |
-| Runtime | **Python 3.10** | Project baseline |
-
-## Methodology: avoiding lookahead bias
-
-Volatility-forecasting pipelines are particularly exposed to data leakage,
-because the "future" value being predicted (realized volatility) is derived
-from the same return series the features are built from. Several rules are
-enforced throughout the pipeline:
-
-1. **Every feature is built from returns, volume, and macro values shifted
-   by at least one day** before any rolling window is applied, so a feature
-   computed for day *t* never uses information realized on day *t* itself.
-2. **Cross-validation uses exclusively `TimeSeriesSplit`** across all three
-   models — a walk-forward split where every validation fold is strictly
-   later in time than its training fold.
-3. **GARCH's information cutoff is matched to the ML features', not left
-   implicit.** The `arch` package's rolling forecast, by default, uses the
-   *actual realized return of the forecast origin day itself* to update its
-   variance state before projecting forward — verified empirically, not
-   assumed (see `src/baselines.py`'s docstring). Left uncorrected, this
-   would give GARCH a one-day information advantage over CatBoost's
-   `.shift(1)`-based features. The forecast is aligned to originate one day
-   earlier and drop the now-mismatched first forecast step, so all three
-   models see the identical information cutoff for every row.
-4. **Optuna tunes on a single chronological holdout, not the full 5-fold
-   CV** — an explicit, documented tradeoff to keep the search cost bounded
-   (see `src/tuning.py`). The resulting hyperparameters are then evaluated
-   across all 5 walk-forward folds for the reported leaderboard, so the
-   comparison against GARCH/HAR-RV is still a full walk-forward evaluation.
-
-## Data
-
-This version runs against a simulated daily copper market (price, volume,
-USD-index proxy, global risk/demand proxy) with **GARCH-X** volatility
-clustering: the conditional variance follows a GARCH(1,1) recursion
-augmented with lagged, squared macro shocks, so the macro series are
-genuine — not decorative — leading indicators of copper volatility, and
-volume is tied to the same underlying volatility path plus day-of-week
-seasonality. All series are 100% synthetic and explicitly labeled as such;
-see `src/data.py` for the full, documented causal structure. This lets the
-full pipeline — feature engineering, tuning, walk-forward validation, and
-explainability — be exercised and validated end to end ahead of connecting
-real market data (see Roadmap).
-
-## Features
-
-| Group | Features | Description |
-|---|---|---|
-| Return | `realized_vol_{5,10,20,60}d`, `mean_return_{5,10,20,60}d`, `lag_return_{1,2,3}` | Rolling std/mean of past returns, short-lag returns |
-| Volume | `log_volume_lag1`, `log_volume_roll_{mean,std}_{5,20}d` | Rolling statistics of log trading volume |
-| Macro | `{usd_index,risk_proxy}_change_1d`, `..._roll_std_{5,20}d`, `..._roll_abs_mean_{5,20}d` | Rolling statistics of USD-index and risk-proxy changes |
-| Calendar | `day_of_week`, `month` | Known in advance, no leakage |
-
-**HAR-RV components** (used only by the HAR-RV baseline, kept separate from
-the ML feature set to stay textbook-faithful): `har_rv_daily`,
-`har_rv_weekly` (5d), `har_rv_monthly` (22d) — the canonical Corsi (2009)
-horizons.
-
-**Target**: `target_fwd_realized_vol` — standard deviation of returns over
-days *t+1* through *t+5*, the quantity all three models forecast.
-
-## Results
-
-Output from a full run (3,000 simulated trading days, 2,934 rows after
-feature/target construction, 30 Optuna trials, 5-fold `TimeSeriesSplit`):
-
-```
-Model            RMSE (mean)   RMSE (std)   MAE (mean)   MAE (std)
-catboost            0.008163     0.002375     0.005921    0.001455
-garch               0.007824     0.001822     0.005856    0.001017
-har_rv              0.008076     0.002102     0.005867    0.001242
-```
-
-**GARCH(1,1) wins this benchmark** — and there's an honest, structural reason
-for it, not a tuning failure to paper over: the synthetic series *is* a
-GARCH-X process by construction (see Data above), so a correctly-specified
-GARCH(1,1) recovers the generating alpha/beta persistence almost
-analytically via maximum likelihood, while CatBoost has to approximate that
-same recursive, multiplicative dynamic from a finite set of rolling-window
-features — an inherently more indirect representation. CatBoost's edge would
-come from nonlinearity or interactions GARCH can't express, and here the
-macro signal it does add (10.8% of SHAP weight, see below) is a relatively
-small, roughly linear addition that GARCH's own persistence already absorbs
-indirectly through volatility clustering. HAR-RV — a 3-regressor linear
-model — lands remarkably close to CatBoost despite its simplicity, a
-reminder that realized-volatility forecasting has unusually strong classical
-baselines, not easy strawmen.
-
-**SHAP importance by feature group** (`outputs/shap_group_importance.csv`):
-
-| Group | Share of total SHAP weight |
-|---|---:|
-| Volume | 41.35% |
-| Return | 40.28% |
-| Macro | 10.81% |
-| Calendar | 7.56% |
-
-The macro share isn't noise: SHAP recovers a real, non-trivial weight for
-the exact `usd_index`/`risk_proxy` features that `src/data.py` injects as
-genuine (lagged) drivers of the variance equation — validating the
-explainability pipeline against a known ground truth, not just producing
-plausible-looking numbers. Volume dominates, consistent with how the series
-is constructed (volume is tied directly to the conditional-volatility path)
-and with the real market-microstructure fact that volume leads/coincides
-with volatility clustering.
-
-Full RMSE/MAE-per-fold tables, the Optuna convergence plot, SHAP bar/beeswarm
-plots, and a single-day local explanation are in
-[`02_CatBoost_Optuna_GARCH_Comparison.ipynb`](02_CatBoost_Optuna_GARCH_Comparison.ipynb).
-
-## Third approach: PyTorch MLP (activation comparison)
-
-`src/deep_learning.py` adds a third, complementary modeling approach on top
-of the identical lookahead-safe feature/target pipeline and walk-forward
-`TimeSeriesSplit` folds: a small feed-forward network (`MLPVolatilityForecaster`,
-two hidden layers, Softplus output head so predictions stay non-negative)
-trained with a custom **`HuberRMSPELoss`** — a Huber term (robust to the rare
-large volatility spikes the GARCH-X generator injects) plus an RMSPE-style
-relative term, since a fixed absolute miss matters far more in a low-vol
-regime than a high-vol one. The MLP is evaluated across three activation
-functions — **ReLU**, **GELU**, and **Swish (SiLU)** — on the same 5-fold
-walk-forward split used for CatBoost/GARCH/HAR-RV.
-
-### Three-way model comparison
-
-| Approach | Model | RMSE (mean) | MAE (mean) | Latency (ms/sample) |
-|---|---|---:|---:|---:|
-| Econometric baseline | **GARCH(1,1)** | 0.007824 | 0.005856 | — |
-| Econometric baseline | HAR-RV | 0.008076 | 0.005867 | — |
-| Gradient-boosted trees | CatBoost (Optuna-tuned) | 0.008163 | 0.005921 | — |
-| Deep learning (PyTorch) | MLP — ReLU (best activation) | 0.014772 | 0.011566 | 0.0004 |
-| Deep learning (PyTorch) | MLP — Swish | 0.015576 | 0.012354 | 0.0006 |
-| Deep learning (PyTorch) | MLP — GELU | 0.016483 | 0.013092 | 0.0006 |
-
-The econometric baselines and the tuned gradient booster still win this
-benchmark — expected, for the same structural reason CatBoost itself trails
-GARCH (see Results above): the synthetic series is a GARCH-X process by
-construction, and a small MLP over engineered rolling-window features has
-even less direct access to that recursive, multiplicative variance dynamic
-than a tree ensemble does. ReLU is the best-performing activation of the
-three here, ahead of Swish and GELU, though all three MLP variants are
-within a comparable range — the honest takeaway for this dataset is that a
-correctly-specified econometric model beats both ML approaches, not that
-one ML approach dominates the other. Inference latency is sub-millisecond
-per sample for all three activations, which is the MLP's practical edge over
-CatBoost/GARCH refitting in a low-latency serving context.
-
-### Plots
-
-![Predicted vs. actual](reports/figures/predicted_vs_actual.png)
-
-![Residual distribution](reports/figures/residual_distribution.png)
-
-The animated version below traces each activation's train/val loss epoch by epoch, with a live-updating value label at the leading edge of every line.
-
-![MLP loss curves by activation, animated](reports/figures/mlp_loss_curves_animated.gif)
-
-![MLP loss curves by activation](reports/figures/mlp_loss_curves.png)
-
-All three plots are regenerated on every `main.py` run (`src/plots.py`,
-written to `outputs/plots/`); the copies embedded above are committed
-snapshots in `reports/figures/`. Comparative metrics and predictions for
-every model (CatBoost, GARCH, HAR-RV, and all three MLP activations) are
-additionally persisted to a local DuckDB file, `outputs/comparison_metrics.duckdb`
-(`src/persistence.py`), keyed by run timestamp so results from separate runs
-can be queried without re-running the pipeline.
+| Data | **urllib**, **Polars** | Download, validation and lookahead-safe feature engineering |
+| Econometrics | **arch** (GARCH), **statsmodels** (HAR-RV, Newey-West) | Baselines and Diebold-Mariano tests |
+| Machine learning | **CatBoost**, **Optuna**, **scikit-learn** | Gradient boosting, per-fold tuning, walk-forward splits |
+| Deep learning | **PyTorch** | MLP with three activation functions |
+| Explainability | **SHAP** | Feature and feature-group attribution |
+| Storage | **DuckDB** | Metrics and out-of-sample forecasts per run |
 
 ## Getting started
 
 ```powershell
 py -m venv venv
 ./venv/Scripts/pip install -r requirements.txt
-./venv/Scripts/python main.py
+./venv/Scripts/python main.py --download   # once: 17 raw files from mindicador.cl and FRED into data/raw/
+./venv/Scripts/python main.py              # about 15 minutes on a laptop CPU
 ```
 
-Writes all artifacts (model, SHAP values, Optuna history, walk-forward
-comparison) to `outputs/`.
-
-### Notebook
-
-```powershell
-./venv/Scripts/jupyter notebook 02_CatBoost_Optuna_GARCH_Comparison.ipynb
-```
-
-Requires having run `main.py` first.
+It writes the figures to `reports/figures/`, the summary behind every number in this README to `reports/results.json`, and the full artifacts (SHAP values, the CatBoost model, the Optuna history, a DuckDB file with every forecast) to `outputs/`. The notebook [`02_CatBoost_Optuna_GARCH_Comparison.ipynb`](02_CatBoost_Optuna_GARCH_Comparison.ipynb) reads those artifacts.
 
 ### Tests
 
@@ -302,25 +167,14 @@ Requires having run `main.py` first.
 ./venv/Scripts/pytest -v
 ```
 
-25 tests: no-overflow/finite-value checks on the synthetic generator,
-lookahead-bias checks on the feature set (a same-day perturbation must not
-change that day's own features, but must change the next day's), GARCH's
-information-cutoff alignment with the ML features (verified by corruption
-tests, not assumed), walk-forward comparison structure, Optuna search
-sanity, SHAP shape/aggregation invariants, PyTorch MLP forward-pass/loss/
-training-loop and activation-comparison checks, plot-writing checks, and a
-DuckDB persistence round-trip.
+57 tests, no network needed (the pipeline's tests run on a small simulated market with the same schema as the real one): validation of the raw files (duplicates, weekend dates, wrong units, holes), the dollar index's publication cutoff, lookahead checks on every feature group, GARCH's information cutoff, a test that a fold never sees its own validation targets, QLIKE and Diebold-Mariano, the MLP's early stopping, plots, DuckDB persistence, and a check that every number in both READMEs' results table matches `reports/results.json`.
 
 ## Roadmap
 
-- Connect a real sourced copper price/volume series (LME/COMEX futures) and
-  real macro data (DXY, a genuine risk index) in place of the synthetic
-  GARCH-X generator.
-- Extend the GARCH baseline to a GARCH-X specification with the same macro
-  regressors CatBoost sees, for a fairer test of whether ML's advantage
-  survives once the econometric baseline can use the same information.
-- Add a rolling/expanding hyperparameter re-tuning schedule instead of a
-  single Optuna search reused across all 5 walk-forward folds.
+- Use the LME holiday calendar to scale returns that span more than one session, instead of keeping them as single days.
+- Intraday prices, to build realized variance from five-minute returns: the standard input for HAR-RV, far less noisy than a daily root mean square.
+- A GARCH-X with the VIX in the variance equation, to test the macro inputs inside the model that wins.
+- A longer copper history: mindicador starts in October 2012.
 
 ## License
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Copper Volatility Forecaster</title>
-<meta name="description" content="**[English](README.md) | [Español](README.es.md)**">
+<meta name="description" content="On 14 years of real London Metal Exchange copper prices, a GARCH(1,1) from 1986 forecasts next week&#x27;s volatility as well as anything else I tested: a CatBoost tuned with Optuna ins">
 <style>
   :root { --bg:#FBFAF8; --surface:#FFF; --ink:#23201D; --muted:#6B645D; --line:#E3DED7; --accent:#B5553D; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
@@ -38,28 +38,42 @@
 <div class="wrap">
 <header>
 <h1>Copper Volatility Forecaster</h1>
-<p class="lede"><strong>[English](README.md) | [Español](README.es.md)</strong></p>
+<p class="lede">On 14 years of real London Metal Exchange copper prices, a GARCH(1,1) from 1986 forecasts next week&#x27;s volatility as well as anything else I tested: a CatBoost tuned with Optuna inside every walk-forward fold does not beat it, and the only model that ties it is a linear HAR-RV with the VIX and the dollar index added.</p>
 <div class="links">
 <a href="https://github.com/Rxyxs/copper-volatility-forecaster">Code and method</a>
 <a href="https://github.com/Rxyxs/copper-volatility-forecaster#readme">Full README</a>
 </div></header>
 <p>This page shows the project's results. The methodology, the design decisions and the limitations are documented in the repository's README.</p>
-<h2>Plots</h2>
+<h2>Data</h2>
+<figure>
+<img src="figures/copper_price_and_vol.png" alt="Copper price and realized volatility" loading="lazy">
+<figcaption>Fourteen years of the LME price and its 20-day realized volatility, which averages about 21% a year and spikes to 44% in April 2020 and 51% in November 2021, after the October 2021 squeeze on the LME&#x27;s nearby contracts.</figcaption>
+</figure>
+<h2>Results</h2>
+<figure>
+<img src="figures/model_comparison.png" alt="Model comparison against persistence" loading="lazy">
+<figcaption>Each model&#x27;s RMSE and QLIKE divided by persistence&#x27;s, fold by fold, on a log scale: GARCH, HAR-X, HAR-RV and EWMA cluster together, CatBoost keeps up on RMSE but trails on QLIKE, and the MLPs sit closest to persistence.</figcaption>
+</figure>
+<figure>
+<img src="figures/forecasts_last_fold.png" alt="Forecasts in the last fold" loading="lazy">
+<figcaption>The last fold, July 2024 to September 2026: the three best models follow the level of volatility, but none sees a spike coming, the April 2025 one included; they react afterwards. That is the limit of what a five-day volatility forecast can do.</figcaption>
+</figure>
+<h2>Third approach: PyTorch MLP (activation comparison)</h2>
 <figure>
 <img src="figures/predicted_vs_actual.png" alt="Predicted vs. actual" loading="lazy">
-<figcaption>The animated version below traces each activation&#x27;s train/val loss epoch by epoch, with a live-updating value label at the leading edge of every line.</figcaption>
+<figcaption>Forecasts against realized volatility in the last fold: every model compresses its forecasts into a narrow band, because most of a single week&#x27;s volatility is noise that no forecast can follow.</figcaption>
 </figure>
 <figure>
 <img src="figures/residual_distribution.png" alt="Residual distribution" loading="lazy">
-<figcaption>The animated version below traces each activation&#x27;s train/val loss epoch by epoch, with a live-updating value label at the leading edge of every line.</figcaption>
+<figcaption>The errors are skewed: the models over-forecast calm weeks by a few points and under-forecast the rare turbulent ones by much more, which is exactly what QLIKE penalizes.</figcaption>
 </figure>
 <figure>
 <img src="figures/mlp_loss_curves_animated.gif" alt="MLP loss curves by activation, animated" loading="lazy">
-<figcaption>All three plots are regenerated on every <code>main.py</code> run (<code>src/plots.py</code>,</figcaption>
+<figcaption>Training and validation loss per epoch, drawn as the training happened.</figcaption>
 </figure>
 <figure>
 <img src="figures/mlp_loss_curves.png" alt="MLP loss curves by activation" loading="lazy">
-<figcaption>All three plots are regenerated on every <code>main.py</code> run (<code>src/plots.py</code>,</figcaption>
+<figcaption>The same curves with the epoch kept by early stopping marked: training loss keeps falling while validation loss stays flat around 0.30 from the first epochs.</figcaption>
 </figure>
 <footer>
 Pablo Reyes · <a href="https://github.com/Rxyxs/copper-volatility-forecaster">github.com/Rxyxs/copper-volatility-forecaster</a> · MIT<br><br>
